@@ -76,6 +76,53 @@ class TestSerializer(serializers.ModelSerializer):
         ]
 
 
+class CreateTestQuestionSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=Question.QuestionType.choices, default=Question.QuestionType.SINGLE_CHOICE)
+    prompt = serializers.CharField()
+    options = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
+    answer = serializers.CharField(allow_blank=True)
+    explanation = serializers.CharField(required=False, allow_blank=True)
+    skills = serializers.ListField(child=serializers.IntegerField(), required=False, allow_empty=True)
+
+
+class CreateTestSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=160)
+    slug = serializers.SlugField(max_length=50)
+    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all())
+    topic = serializers.PrimaryKeyRelatedField(queryset=Topic.objects.select_related("subject").all())
+    difficulty = serializers.ChoiceField(choices=Question.Difficulty.choices)
+    estimated_minutes = serializers.IntegerField(min_value=1, default=10)
+    passing_score = serializers.IntegerField(min_value=0, max_value=100, default=70)
+    questions = CreateTestQuestionSerializer(many=True)
+
+    def validate(self, attrs):
+        if attrs["topic"].subject_id != attrs["subject"].id:
+            raise serializers.ValidationError({"topic": "Topic must belong to selected subject."})
+        if len(attrs["questions"]) < 1:
+            raise serializers.ValidationError({"questions": "At least one question is required."})
+        if Test.objects.filter(slug=attrs["slug"]).exists():
+            raise serializers.ValidationError({"slug": "A test with this slug already exists."})
+        return attrs
+
+    def create(self, validated_data):
+        questions_data = validated_data.pop("questions")
+        test = Test.objects.create(**validated_data)
+        created_questions = []
+        for index, question_data in enumerate(questions_data, start=1):
+            skill_ids = question_data.pop("skills", [])
+            question = Question.objects.create(
+                subject=test.subject,
+                topic=test.topic,
+                difficulty=test.difficulty,
+                **question_data,
+            )
+            if skill_ids:
+                question.skills.set(Skill.objects.filter(id__in=skill_ids, topic=test.topic))
+            TestQuestion.objects.create(test=test, question=question, order=index)
+            created_questions.append(question)
+        return test
+
+
 class AnswerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Answer
