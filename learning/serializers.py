@@ -87,6 +87,7 @@ class TestSerializer(serializers.ModelSerializer):
             "estimated_minutes",
             "passing_score",
             "status",
+            "creator_name",
             "test_questions",
         ]
 
@@ -97,7 +98,7 @@ class CreateTestQuestionSerializer(serializers.Serializer):
     options = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
     answer = serializers.CharField(allow_blank=True)
     explanation = serializers.CharField(required=False, allow_blank=True)
-    skills = serializers.ListField(child=serializers.IntegerField(), required=False, allow_empty=True)
+    skills = serializers.ListField(child=serializers.IntegerField(), required=True, allow_empty=False)
 
 
 class WriteTestSerializer(serializers.Serializer):
@@ -109,17 +110,32 @@ class WriteTestSerializer(serializers.Serializer):
     estimated_minutes = serializers.IntegerField(min_value=1, default=10)
     passing_score = serializers.IntegerField(min_value=0, max_value=100, default=70)
     status = serializers.ChoiceField(choices=Test.PublishStatus.choices, default=Test.PublishStatus.PUBLISHED)
+    creator_name = serializers.CharField(max_length=160, required=False, allow_blank=True)
+    creator_code = serializers.CharField(max_length=80, required=False, allow_blank=True, write_only=True)
+    manage_key = serializers.CharField(max_length=80, required=False, allow_blank=True, write_only=True)
     questions = CreateTestQuestionSerializer(many=True)
 
     def validate(self, attrs):
-        if attrs["topic"].subject_id != attrs["subject"].id:
-            raise serializers.ValidationError({"topic": "Topic must belong to selected subject."})
-        if len(attrs["questions"]) < 1:
-            raise serializers.ValidationError({"questions": "At least one question is required."})
         instance = getattr(self, "instance", None)
+        subject = attrs.get("subject") or getattr(instance, "subject", None)
+        topic = attrs.get("topic") or getattr(instance, "topic", None)
+        if topic and subject and topic.subject_id != subject.id:
+            raise serializers.ValidationError({"topic": "Topic must belong to selected subject."})
+        questions = attrs.get("questions")
+        if questions is not None and len(questions) < 1:
+            raise serializers.ValidationError({"questions": "At least one question is required."})
         slug = attrs.get("slug")
         if slug and Test.objects.filter(slug=slug).exclude(id=getattr(instance, "id", None)).exists():
             raise serializers.ValidationError({"slug": "A test with this slug already exists."})
+        if instance and instance.manage_key:
+            manage_key = attrs.get("manage_key") or self.initial_data.get("manage_key")
+            if manage_key != instance.manage_key:
+                raise serializers.ValidationError({"manage_key": "Valid manage key is required."})
+        for index, question in enumerate(questions or [], start=1):
+            skill_ids = question.get("skills", [])
+            matched_count = Skill.objects.filter(id__in=skill_ids, topic=topic).count()
+            if matched_count != len(set(skill_ids)):
+                raise serializers.ValidationError({"questions": f"Question {index} has skills outside selected topic."})
         return attrs
 
     def create(self, validated_data):
@@ -147,8 +163,7 @@ class WriteTestSerializer(serializers.Serializer):
                 difficulty=test.difficulty,
                 **question_data,
             )
-            if skill_ids:
-                question.skills.set(Skill.objects.filter(id__in=skill_ids, topic=test.topic))
+            question.skills.set(Skill.objects.filter(id__in=skill_ids, topic=test.topic))
             TestQuestion.objects.create(test=test, question=question, order=index)
 
 
@@ -179,6 +194,7 @@ class TestSessionSerializer(serializers.ModelSerializer):
             "exam_pack",
             "exam_pack_item",
             "student_name",
+            "student_code",
             "status",
             "submitted_at",
             "answers",
@@ -233,6 +249,7 @@ class TeacherClassSerializer(serializers.ModelSerializer):
             "teacher_name",
             "visibility",
             "join_code",
+            "manage_code",
             "description",
             "student_count",
             "assignment_count",
@@ -280,6 +297,7 @@ class ExamPackSerializer(serializers.ModelSerializer):
             "exam_type",
             "visibility",
             "access_code",
+            "manage_code",
             "price_label",
             "is_active",
             "item_count",

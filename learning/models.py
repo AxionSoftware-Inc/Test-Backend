@@ -83,6 +83,9 @@ class Test(TimestampedModel):
     estimated_minutes = models.PositiveIntegerField(default=10)
     passing_score = models.PositiveIntegerField(default=70)
     status = models.CharField(max_length=24, choices=PublishStatus.choices, default=PublishStatus.PUBLISHED)
+    creator_name = models.CharField(max_length=160, blank=True)
+    creator_code = models.CharField(max_length=80, blank=True)
+    manage_key = models.CharField(max_length=80, blank=True)
     questions = models.ManyToManyField(Question, through="TestQuestion", related_name="tests")
 
     def __str__(self) -> str:
@@ -99,6 +102,7 @@ class TeacherClass(TimestampedModel):
     teacher_name = models.CharField(max_length=160)
     visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PUBLIC)
     join_code = models.CharField(max_length=32, blank=True)
+    manage_code = models.CharField(max_length=80, blank=True)
     description = models.TextField(blank=True)
 
     def __str__(self) -> str:
@@ -140,6 +144,7 @@ class ExamPack(TimestampedModel):
     exam_type = models.CharField(max_length=80, blank=True)
     visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PUBLIC)
     access_code = models.CharField(max_length=32, blank=True)
+    manage_code = models.CharField(max_length=80, blank=True)
     price_label = models.CharField(max_length=80, blank=True)
     is_active = models.BooleanField(default=True)
 
@@ -184,6 +189,7 @@ class TestSession(TimestampedModel):
     exam_pack = models.ForeignKey(ExamPack, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
     exam_pack_item = models.ForeignKey(ExamPackItem, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
     student_name = models.CharField(max_length=160, blank=True)
+    student_code = models.CharField(max_length=80, blank=True)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
     submitted_at = models.DateTimeField(null=True, blank=True)
 

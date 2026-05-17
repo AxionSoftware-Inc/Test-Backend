@@ -33,6 +33,28 @@ from learning.serializers import (
 )
 
 
+def request_value(request, key, default=""):
+    return request.data.get(key, request.query_params.get(key, default))
+
+
+def require_manage_code(request, expected):
+    if not expected:
+        return None
+    provided = request_value(request, "manage_code")
+    if provided != expected:
+        return response.Response({"detail": "Valid manage code is required."}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def require_manage_key(request, expected):
+    if not expected:
+        return None
+    provided = request_value(request, "manage_key")
+    if provided != expected:
+        return response.Response({"detail": "Valid manage key is required."}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
 class SubjectViewSet(viewsets.ModelViewSet):
     queryset = Subject.objects.all().order_by("title")
     serializer_class = SubjectSerializer
@@ -137,6 +159,9 @@ class TestViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
+        denied = require_manage_key(request, instance.manage_key)
+        if denied:
+            return denied
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         test = serializer.save()
@@ -154,6 +179,9 @@ class TestViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         test = self.get_object()
+        denied = require_manage_key(request, test.manage_key)
+        if denied:
+            return denied
         if test.sessions.exists():
             test.status = Test.PublishStatus.DRAFT
             test.save(update_fields=["status", "updated_at"])
@@ -163,7 +191,12 @@ class TestViewSet(viewsets.ModelViewSet):
     @decorators.action(detail=True, methods=["post"])
     def start(self, request, slug=None):
         test = self.get_object()
-        session = TestSession.objects.create(test=test, user=request.user if request.user.is_authenticated else None)
+        session = TestSession.objects.create(
+            test=test,
+            student_name=request.data.get("student_name", "").strip(),
+            student_code=request.data.get("student_code", "").strip(),
+            user=request.user if request.user.is_authenticated else None,
+        )
         return response.Response(TestSessionSerializer(session).data, status=status.HTTP_201_CREATED)
 
 
@@ -213,7 +246,9 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
             return response.Response({"detail": "Invalid join code."}, status=status.HTTP_403_FORBIDDEN)
         if not student_name:
             return response.Response({"student_name": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
-        student_code = request.data.get("student_code") or f"{classroom.slug}-{student_name.lower().replace(' ', '-')}"
+        student_code = request.data.get("student_code", "").strip()
+        if not student_code:
+            return response.Response({"student_code": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
         student, _ = ClassStudent.objects.get_or_create(
             classroom=classroom,
             student_code=student_code,
@@ -231,6 +266,9 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
             assignments = classroom.assignments.select_related("test").order_by("-created_at")
             return response.Response(ClassTestAssignmentSerializer(assignments, many=True).data)
 
+        denied = require_manage_code(request, classroom.manage_code)
+        if denied:
+            return denied
         serializer = ClassTestAssignmentSerializer(data={**request.data, "classroom": classroom.id})
         serializer.is_valid(raise_exception=True)
         assignment = serializer.save(classroom=classroom)
@@ -248,11 +286,20 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
             return response.Response({"detail": "Invalid join code."}, status=status.HTTP_403_FORBIDDEN)
         if not student_name:
             return response.Response({"student_name": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
+        student_code = request.data.get("student_code", "").strip()
+        if not student_code:
+            return response.Response({"student_code": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
+        ClassStudent.objects.update_or_create(
+            classroom=classroom,
+            student_code=student_code,
+            defaults={"name": student_name},
+        )
         session = TestSession.objects.create(
             test=assignment.test,
             classroom=classroom,
             assignment=assignment,
             student_name=student_name,
+            student_code=student_code,
             user=request.user if request.user.is_authenticated else None,
         )
         return response.Response(TestSessionSerializer(session).data, status=status.HTTP_201_CREATED)
@@ -328,6 +375,9 @@ class ExamPackViewSet(viewsets.ModelViewSet):
         if request.method == "GET":
             return response.Response(ExamPackItemSerializer(pack.items.select_related("test"), many=True).data)
 
+        denied = require_manage_code(request, pack.manage_code)
+        if denied:
+            return denied
         serializer = ExamPackItemSerializer(data={**request.data, "pack": pack.id})
         serializer.is_valid(raise_exception=True)
         item = serializer.save(pack=pack)
@@ -345,11 +395,15 @@ class ExamPackViewSet(viewsets.ModelViewSet):
             return response.Response({"detail": "Invalid access code."}, status=status.HTTP_403_FORBIDDEN)
         if not student_name:
             return response.Response({"student_name": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
+        student_code = request.data.get("student_code", "").strip()
+        if not student_code:
+            return response.Response({"student_code": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
         session = TestSession.objects.create(
             test=item.test,
             exam_pack=pack,
             exam_pack_item=item,
             student_name=student_name,
+            student_code=student_code,
             user=request.user if request.user.is_authenticated else None,
         )
         return response.Response(TestSessionSerializer(session).data, status=status.HTTP_201_CREATED)
@@ -399,11 +453,14 @@ class ExamPackViewSet(viewsets.ModelViewSet):
 
 @decorators.api_view(["GET"])
 def profile_summary(request):
+    student_code = request.query_params.get("student_code", "").strip()
     sessions = (
         TestSession.objects.select_related("test", "test__topic", "test__subject")
         .prefetch_related("answers", "test__testquestion_set__question")
         .order_by("-created_at")
     )
+    if student_code:
+        sessions = sessions.filter(student_code=student_code)
     submitted_sessions = [session for session in sessions if session.status == TestSession.Status.SUBMITTED]
 
     recent_tests = []
@@ -507,12 +564,15 @@ def profile_summary(request):
 
 @decorators.api_view(["GET"])
 def mistakes_summary(request):
+    student_code = request.query_params.get("student_code", "").strip()
     sessions = (
         TestSession.objects.filter(status=TestSession.Status.SUBMITTED)
         .select_related("test", "test__topic")
         .prefetch_related("answers", "test__testquestion_set__question__skills")
         .order_by("-submitted_at")
     )
+    if student_code:
+        sessions = sessions.filter(student_code=student_code)
     mistakes = []
     skill_totals = {}
     for session in sessions:
