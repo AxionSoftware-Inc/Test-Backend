@@ -1,6 +1,20 @@
 from django.contrib import admin
 
-from learning.models import Answer, Question, Skill, Subject, Test, TestQuestion, TestSession, Topic
+from learning.models import (
+    Answer,
+    ClassStudent,
+    ClassTestAssignment,
+    ExamPack,
+    ExamPackItem,
+    Question,
+    Skill,
+    Subject,
+    TeacherClass,
+    Test,
+    TestQuestion,
+    TestSession,
+    Topic,
+)
 
 
 class TestQuestionInline(admin.TabularInline):
@@ -42,3 +56,8 @@ class QuestionAdmin(admin.ModelAdmin):
 
 admin.site.register(TestSession)
 admin.site.register(Answer)
+admin.site.register(TeacherClass)
+admin.site.register(ClassStudent)
+admin.site.register(ClassTestAssignment)
+admin.site.register(ExamPack)
+admin.site.register(ExamPackItem)

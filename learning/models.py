@@ -71,6 +71,10 @@ class Question(TimestampedModel):
 
 
 class Test(TimestampedModel):
+    class PublishStatus(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+
     title = models.CharField(max_length=160)
     slug = models.SlugField(unique=True)
     subject = models.ForeignKey(Subject, related_name="tests", on_delete=models.PROTECT)
@@ -78,7 +82,81 @@ class Test(TimestampedModel):
     difficulty = models.CharField(max_length=32, choices=Question.Difficulty.choices)
     estimated_minutes = models.PositiveIntegerField(default=10)
     passing_score = models.PositiveIntegerField(default=70)
+    status = models.CharField(max_length=24, choices=PublishStatus.choices, default=PublishStatus.PUBLISHED)
     questions = models.ManyToManyField(Question, through="TestQuestion", related_name="tests")
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class TeacherClass(TimestampedModel):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Public"
+        PRIVATE = "private", "Private"
+
+    name = models.CharField(max_length=160)
+    slug = models.SlugField(unique=True)
+    teacher_name = models.CharField(max_length=160)
+    visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PUBLIC)
+    join_code = models.CharField(max_length=32, blank=True)
+    description = models.TextField(blank=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ClassStudent(TimestampedModel):
+    classroom = models.ForeignKey(TeacherClass, related_name="students", on_delete=models.CASCADE)
+    name = models.CharField(max_length=160)
+    student_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        unique_together = ("classroom", "student_code")
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ClassTestAssignment(TimestampedModel):
+    classroom = models.ForeignKey(TeacherClass, related_name="assignments", on_delete=models.CASCADE)
+    test = models.ForeignKey(Test, related_name="class_assignments", on_delete=models.CASCADE)
+    title = models.CharField(max_length=160)
+    opens_at = models.DateTimeField(null=True, blank=True)
+    closes_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class ExamPack(TimestampedModel):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Public"
+        PRIVATE = "private", "Private"
+
+    title = models.CharField(max_length=160)
+    slug = models.SlugField(unique=True)
+    description = models.TextField(blank=True)
+    exam_type = models.CharField(max_length=80, blank=True)
+    visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PUBLIC)
+    access_code = models.CharField(max_length=32, blank=True)
+    price_label = models.CharField(max_length=80, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class ExamPackItem(TimestampedModel):
+    pack = models.ForeignKey(ExamPack, related_name="items", on_delete=models.CASCADE)
+    test = models.ForeignKey(Test, related_name="exam_pack_items", on_delete=models.CASCADE)
+    title = models.CharField(max_length=160)
+    order = models.PositiveIntegerField(default=0)
+    is_required = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+        unique_together = ("pack", "test")
 
     def __str__(self) -> str:
         return self.title
@@ -101,6 +179,11 @@ class TestSession(TimestampedModel):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     test = models.ForeignKey(Test, related_name="sessions", on_delete=models.CASCADE)
+    classroom = models.ForeignKey(TeacherClass, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
+    assignment = models.ForeignKey(ClassTestAssignment, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
+    exam_pack = models.ForeignKey(ExamPack, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
+    exam_pack_item = models.ForeignKey(ExamPackItem, null=True, blank=True, related_name="sessions", on_delete=models.SET_NULL)
+    student_name = models.CharField(max_length=160, blank=True)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
     submitted_at = models.DateTimeField(null=True, blank=True)
 
@@ -116,4 +199,3 @@ class Answer(TimestampedModel):
 
     class Meta:
         unique_together = ("session", "question")
-
