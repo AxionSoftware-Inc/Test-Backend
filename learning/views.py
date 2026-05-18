@@ -57,6 +57,163 @@ def require_manage_key(request, expected):
     return None
 
 
+def score_session(session):
+    questions = [item.question for item in session.test.testquestion_set.all()]
+    answer_map = {answer.question_id: answer.value.strip() for answer in session.answers.all()}
+    correct = sum(1 for question in questions if answer_map.get(question.id, "") == question.answer.strip())
+    total = len(questions)
+    score = round((correct / total) * 100) if total else 0
+    return questions, answer_map, correct, total, score
+
+
+def class_results_payload(classroom):
+    sessions = (
+        TestSession.objects.filter(classroom=classroom, status=TestSession.Status.SUBMITTED)
+        .select_related("test", "assignment")
+        .prefetch_related("answers", "test__testquestion_set__question__skills")
+        .order_by("-submitted_at")
+    )
+    rows = []
+    skill_totals = {}
+    score_sum = 0
+    student_totals = {}
+    assignment_totals = {}
+
+    for assignment in classroom.assignments.select_related("test").all():
+        assignment_totals[assignment.id] = {
+            "assignment_id": assignment.id,
+            "assignment_title": assignment.title,
+            "test_title": assignment.test.title,
+            "test_slug": assignment.test.slug,
+            "is_active": assignment.is_active,
+            "attempts": 0,
+            "unique_students": 0,
+            "average_score": 0,
+            "_score_sum": 0,
+            "_students": set(),
+        }
+
+    for session in sessions:
+        questions, answer_map, correct, total, score = score_session(session)
+        score_sum += score
+        student_name = session.student_name or "Student"
+        student_code = session.student_code or student_name
+        student = student_totals.setdefault(
+            student_code,
+            {
+                "student_name": student_name,
+                "student_code": student_code,
+                "completed": 0,
+                "average_score": 0,
+                "_score_sum": 0,
+                "last_submitted_at": None,
+            },
+        )
+        student["student_name"] = student_name
+        student["completed"] += 1
+        student["_score_sum"] += score
+        submitted_at = session.submitted_at.isoformat() if session.submitted_at else None
+        if submitted_at and (student["last_submitted_at"] is None or submitted_at > student["last_submitted_at"]):
+            student["last_submitted_at"] = submitted_at
+
+        if session.assignment_id:
+            assignment_data = assignment_totals.setdefault(
+                session.assignment_id,
+                {
+                    "assignment_id": session.assignment_id,
+                    "assignment_title": session.assignment.title if session.assignment else "",
+                    "test_title": session.test.title,
+                    "test_slug": session.test.slug,
+                    "is_active": session.assignment.is_active if session.assignment else False,
+                    "attempts": 0,
+                    "unique_students": 0,
+                    "average_score": 0,
+                    "_score_sum": 0,
+                    "_students": set(),
+                },
+            )
+            assignment_data["attempts"] += 1
+            assignment_data["_score_sum"] += score
+            assignment_data["_students"].add(student_code)
+
+        for question in questions:
+            is_correct = answer_map.get(question.id, "") == question.answer.strip()
+            for skill in list(question.skills.all()):
+                data = skill_totals.setdefault(skill.title, {"skill": skill.title, "correct": 0, "total": 0})
+                data["correct"] += 1 if is_correct else 0
+                data["total"] += 1
+
+        rows.append(
+            {
+                "session_id": session.id,
+                "student_name": student_name,
+                "student_code": student_code,
+                "test_title": session.test.title,
+                "test_slug": session.test.slug,
+                "assignment_id": session.assignment_id,
+                "assignment_title": session.assignment.title if session.assignment else "",
+                "score": score,
+                "correct": correct,
+                "total": total,
+                "submitted_at": submitted_at,
+            }
+        )
+
+    weak_skills = [
+        {
+            **item,
+            "percent": round((item["correct"] / item["total"]) * 100) if item["total"] else 0,
+        }
+        for item in skill_totals.values()
+    ]
+    weak_skills.sort(key=lambda item: item["percent"])
+
+    students = []
+    for student in student_totals.values():
+        completed = student["completed"]
+        students.append(
+            {
+                "student_name": student["student_name"],
+                "student_code": student["student_code"],
+                "completed": completed,
+                "average_score": round(student["_score_sum"] / completed) if completed else 0,
+                "last_submitted_at": student["last_submitted_at"],
+            }
+        )
+    students.sort(key=lambda item: item["last_submitted_at"] or "", reverse=True)
+
+    assignment_stats = []
+    for item in assignment_totals.values():
+        attempts = item["attempts"]
+        assignment_stats.append(
+            {
+                "assignment_id": item["assignment_id"],
+                "assignment_title": item["assignment_title"],
+                "test_title": item["test_title"],
+                "test_slug": item["test_slug"],
+                "is_active": item["is_active"],
+                "attempts": attempts,
+                "unique_students": len(item["_students"]),
+                "average_score": round(item["_score_sum"] / attempts) if attempts else 0,
+            }
+        )
+
+    count = len(rows)
+    return {
+        "classroom": TeacherClassSerializer(classroom).data,
+        "attempts": count,
+        "average_score": round(score_sum / count) if count else 0,
+        "students_total": classroom.students.count(),
+        "students_submitted": len(students),
+        "sessions_total": classroom.assignments.count(),
+        "sessions_open": classroom.assignments.filter(is_active=True).count(),
+        "results": rows,
+        "weak_skills": weak_skills[:6],
+        "assignment_stats": assignment_stats,
+        "student_progress": students,
+    }
+
+
 @decorators.api_view(["GET", "PATCH"])
 def role_profile(request):
     identity_code = request.query_params.get("identity_code", "").strip() or request.data.get("identity_code", "").strip()
@@ -292,6 +449,71 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
         assignment = serializer.save(classroom=classroom)
         return response.Response(ClassTestAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
 
+    @decorators.action(detail=True, methods=["post"], url_path="assignments/bulk")
+    def bulk_assignments(self, request, slug=None):
+        classroom = self.get_object()
+        denied = require_manage_code(request, classroom.manage_code)
+        if denied:
+            return denied
+        rows = request.data.get("assignments", [])
+        if not isinstance(rows, list):
+            return response.Response({"assignments": "Expected a list."}, status=status.HTTP_400_BAD_REQUEST)
+        created = []
+        skipped = []
+        for row in rows:
+            test_slug = str(row.get("test_slug", "")).strip()
+            test_id = row.get("test")
+            test = None
+            if test_slug:
+                test = Test.objects.filter(slug=test_slug).first()
+            elif test_id:
+                test = Test.objects.filter(id=test_id).first()
+            if not test:
+                skipped.append({"test_slug": test_slug, "reason": "Test not found."})
+                continue
+            serializer = ClassTestAssignmentSerializer(
+                data={
+                    "classroom": classroom.id,
+                    "test": test.id,
+                    "title": row.get("title") or test.title,
+                    "is_active": row.get("is_active", True),
+                    "opens_at": row.get("opens_at"),
+                    "closes_at": row.get("closes_at"),
+                }
+            )
+            serializer.is_valid(raise_exception=True)
+            created.append(serializer.save(classroom=classroom))
+        return response.Response(
+            {
+                "created": ClassTestAssignmentSerializer(created, many=True).data,
+                "skipped": skipped,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @decorators.action(detail=True, methods=["get", "patch", "delete"], url_path=r"assignments/(?P<assignment_id>[^/.]+)")
+    def assignment_detail(self, request, slug=None, assignment_id=None):
+        classroom = self.get_object()
+        assignment = ClassTestAssignment.objects.select_related("test").get(id=assignment_id, classroom=classroom)
+        if request.method == "GET":
+            return response.Response(ClassTestAssignmentSerializer(assignment).data)
+
+        denied = require_manage_code(request, classroom.manage_code)
+        if denied:
+            return denied
+        if request.method == "DELETE":
+            if assignment.sessions.exists():
+                assignment.is_active = False
+                assignment.save(update_fields=["is_active", "updated_at"])
+                return response.Response(ClassTestAssignmentSerializer(assignment).data)
+            assignment.delete()
+            return response.Response(status=status.HTTP_204_NO_CONTENT)
+
+        serializer = ClassTestAssignmentSerializer(assignment, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        assignment = serializer.save(classroom=classroom)
+        return response.Response(ClassTestAssignmentSerializer(assignment).data)
+
     @decorators.action(detail=True, methods=["post"], url_path=r"assignments/(?P<assignment_id>[^/.]+)/start")
     def start_assignment(self, request, slug=None, assignment_id=None):
         classroom = self.get_object()
@@ -325,61 +547,7 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
     @decorators.action(detail=True, methods=["get"])
     def results(self, request, slug=None):
         classroom = self.get_object()
-        sessions = (
-            TestSession.objects.filter(classroom=classroom, status=TestSession.Status.SUBMITTED)
-            .select_related("test", "assignment")
-            .prefetch_related("answers", "test__testquestion_set__question__skills")
-            .order_by("-submitted_at")
-        )
-        rows = []
-        skill_totals = {}
-        score_sum = 0
-        for session in sessions:
-            questions = [item.question for item in session.test.testquestion_set.all()]
-            answer_map = {answer.question_id: answer.value.strip() for answer in session.answers.all()}
-            correct = sum(1 for question in questions if answer_map.get(question.id, "") == question.answer.strip())
-            total = len(questions)
-            score = round((correct / total) * 100) if total else 0
-            score_sum += score
-            for question in questions:
-                is_correct = answer_map.get(question.id, "") == question.answer.strip()
-                skills = list(question.skills.all()) or []
-                for skill in skills:
-                    data = skill_totals.setdefault(skill.title, {"skill": skill.title, "correct": 0, "total": 0})
-                    data["correct"] += 1 if is_correct else 0
-                    data["total"] += 1
-            rows.append(
-                {
-                    "session_id": session.id,
-                    "student_name": session.student_name or "Student",
-                    "test_title": session.test.title,
-                    "test_slug": session.test.slug,
-                    "assignment_id": session.assignment_id,
-                    "assignment_title": session.assignment.title if session.assignment else "",
-                    "score": score,
-                    "correct": correct,
-                    "total": total,
-                    "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
-                }
-            )
-        weak_skills = [
-            {
-                **item,
-                "percent": round((item["correct"] / item["total"]) * 100) if item["total"] else 0,
-            }
-            for item in skill_totals.values()
-        ]
-        weak_skills.sort(key=lambda item: item["percent"])
-        count = len(rows)
-        return response.Response(
-            {
-                "classroom": TeacherClassSerializer(classroom).data,
-                "attempts": count,
-                "average_score": round(score_sum / count) if count else 0,
-                "results": rows,
-                "weak_skills": weak_skills[:6],
-            }
-        )
+        return response.Response(class_results_payload(classroom))
 
 
 class ExamPackViewSet(viewsets.ModelViewSet):
