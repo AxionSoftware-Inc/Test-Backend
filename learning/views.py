@@ -214,6 +214,150 @@ def class_results_payload(classroom):
     }
 
 
+def exam_pack_results_payload(pack):
+    sessions = (
+        TestSession.objects.filter(exam_pack=pack, status=TestSession.Status.SUBMITTED)
+        .select_related("test", "exam_pack_item")
+        .prefetch_related("answers", "test__testquestion_set__question__skills")
+        .order_by("-submitted_at")
+    )
+    rows = []
+    score_sum = 0
+    item_totals = {}
+    student_totals = {}
+    skill_totals = {}
+
+    for item in pack.items.select_related("test").all():
+        item_totals[item.id] = {
+            "item_id": item.id,
+            "item_title": item.title,
+            "test_title": item.test.title,
+            "test_slug": item.test.slug,
+            "is_required": item.is_required,
+            "attempts": 0,
+            "unique_students": 0,
+            "average_score": 0,
+            "_score_sum": 0,
+            "_students": set(),
+        }
+
+    for session in sessions:
+        questions, answer_map, correct, total, score = score_session(session)
+        score_sum += score
+        student_name = session.student_name or "Student"
+        student_code = session.student_code or student_name
+        student = student_totals.setdefault(
+            student_code,
+            {
+                "student_name": student_name,
+                "student_code": student_code,
+                "completed": 0,
+                "average_score": 0,
+                "_score_sum": 0,
+                "last_submitted_at": None,
+            },
+        )
+        student["student_name"] = student_name
+        student["completed"] += 1
+        student["_score_sum"] += score
+        submitted_at = session.submitted_at.isoformat() if session.submitted_at else None
+        if submitted_at and (student["last_submitted_at"] is None or submitted_at > student["last_submitted_at"]):
+            student["last_submitted_at"] = submitted_at
+
+        if session.exam_pack_item_id:
+            item_data = item_totals.setdefault(
+                session.exam_pack_item_id,
+                {
+                    "item_id": session.exam_pack_item_id,
+                    "item_title": session.exam_pack_item.title if session.exam_pack_item else "",
+                    "test_title": session.test.title,
+                    "test_slug": session.test.slug,
+                    "is_required": session.exam_pack_item.is_required if session.exam_pack_item else False,
+                    "attempts": 0,
+                    "unique_students": 0,
+                    "average_score": 0,
+                    "_score_sum": 0,
+                    "_students": set(),
+                },
+            )
+            item_data["attempts"] += 1
+            item_data["_score_sum"] += score
+            item_data["_students"].add(student_code)
+
+        for question in questions:
+            is_correct = answer_map.get(question.id, "") == question.answer.strip()
+            for skill in list(question.skills.all()):
+                data = skill_totals.setdefault(skill.title, {"skill": skill.title, "correct": 0, "total": 0})
+                data["correct"] += 1 if is_correct else 0
+                data["total"] += 1
+
+        rows.append(
+            {
+                "session_id": session.id,
+                "student_name": student_name,
+                "student_code": student_code,
+                "test_title": session.test.title,
+                "test_slug": session.test.slug,
+                "item_id": session.exam_pack_item_id,
+                "item_title": session.exam_pack_item.title if session.exam_pack_item else "",
+                "score": score,
+                "correct": correct,
+                "total": total,
+                "submitted_at": submitted_at,
+            }
+        )
+
+    students = []
+    for student in student_totals.values():
+        completed = student["completed"]
+        students.append(
+            {
+                "student_name": student["student_name"],
+                "student_code": student["student_code"],
+                "completed": completed,
+                "average_score": round(student["_score_sum"] / completed) if completed else 0,
+                "last_submitted_at": student["last_submitted_at"],
+            }
+        )
+    students.sort(key=lambda item: item["last_submitted_at"] or "", reverse=True)
+
+    item_stats = []
+    for item in item_totals.values():
+        attempts = item["attempts"]
+        item_stats.append(
+            {
+                "item_id": item["item_id"],
+                "item_title": item["item_title"],
+                "test_title": item["test_title"],
+                "test_slug": item["test_slug"],
+                "is_required": item["is_required"],
+                "attempts": attempts,
+                "unique_students": len(item["_students"]),
+                "average_score": round(item["_score_sum"] / attempts) if attempts else 0,
+            }
+        )
+
+    weak_skills = [
+        {**item, "percent": round((item["correct"] / item["total"]) * 100) if item["total"] else 0}
+        for item in skill_totals.values()
+    ]
+    weak_skills.sort(key=lambda item: item["percent"])
+
+    count = len(rows)
+    return {
+        "pack": ExamPackSerializer(pack).data,
+        "attempts": count,
+        "average_score": round(score_sum / count) if count else 0,
+        "students_submitted": len(students),
+        "items_total": pack.items.count(),
+        "required_total": pack.items.filter(is_required=True).count(),
+        "results": rows,
+        "item_stats": item_stats,
+        "student_progress": students,
+        "weak_skills": weak_skills[:6],
+    }
+
+
 @decorators.api_view(["GET", "PATCH"])
 def role_profile(request):
     identity_code = request.query_params.get("identity_code", "").strip() or request.data.get("identity_code", "").strip()
@@ -569,6 +713,61 @@ class ExamPackViewSet(viewsets.ModelViewSet):
         item = serializer.save(pack=pack)
         return response.Response(ExamPackItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
+    @decorators.action(detail=True, methods=["post"], url_path="items/bulk")
+    def bulk_items(self, request, slug=None):
+        pack = self.get_object()
+        denied = require_manage_code(request, pack.manage_code)
+        if denied:
+            return denied
+        rows = request.data.get("items", [])
+        if not isinstance(rows, list):
+            return response.Response({"items": "Expected a list."}, status=status.HTTP_400_BAD_REQUEST)
+        created = []
+        skipped = []
+        for index, row in enumerate(rows, start=1):
+            test_slug = str(row.get("test_slug", "")).strip()
+            test_id = row.get("test")
+            test = Test.objects.filter(slug=test_slug).first() if test_slug else Test.objects.filter(id=test_id).first()
+            if not test:
+                skipped.append({"test_slug": test_slug, "reason": "Test not found."})
+                continue
+            serializer = ExamPackItemSerializer(
+                data={
+                    "pack": pack.id,
+                    "test": test.id,
+                    "title": row.get("title") or test.title,
+                    "order": row.get("order", index),
+                    "is_required": row.get("is_required", True),
+                }
+            )
+            serializer.is_valid(raise_exception=True)
+            created.append(serializer.save(pack=pack))
+        return response.Response(
+            {"created": ExamPackItemSerializer(created, many=True).data, "skipped": skipped},
+            status=status.HTTP_201_CREATED,
+        )
+
+    @decorators.action(detail=True, methods=["get", "patch", "delete"], url_path=r"items/(?P<item_id>[^/.]+)")
+    def item_detail(self, request, slug=None, item_id=None):
+        pack = self.get_object()
+        item = ExamPackItem.objects.select_related("test").get(id=item_id, pack=pack)
+        if request.method == "GET":
+            return response.Response(ExamPackItemSerializer(item).data)
+        denied = require_manage_code(request, pack.manage_code)
+        if denied:
+            return denied
+        if request.method == "DELETE":
+            if item.sessions.exists():
+                item.is_required = False
+                item.save(update_fields=["is_required", "updated_at"])
+                return response.Response(ExamPackItemSerializer(item).data)
+            item.delete()
+            return response.Response(status=status.HTTP_204_NO_CONTENT)
+        serializer = ExamPackItemSerializer(item, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        item = serializer.save(pack=pack)
+        return response.Response(ExamPackItemSerializer(item).data)
+
     @decorators.action(detail=True, methods=["post"], url_path=r"items/(?P<item_id>[^/.]+)/start")
     def start_item(self, request, slug=None, item_id=None):
         pack = self.get_object()
@@ -597,44 +796,7 @@ class ExamPackViewSet(viewsets.ModelViewSet):
     @decorators.action(detail=True, methods=["get"])
     def results(self, request, slug=None):
         pack = self.get_object()
-        sessions = (
-            TestSession.objects.filter(exam_pack=pack, status=TestSession.Status.SUBMITTED)
-            .select_related("test", "exam_pack_item")
-            .prefetch_related("answers", "test__testquestion_set__question")
-            .order_by("-submitted_at")
-        )
-        rows = []
-        score_sum = 0
-        for session in sessions:
-            questions = [item.question for item in session.test.testquestion_set.all()]
-            answer_map = {answer.question_id: answer.value.strip() for answer in session.answers.all()}
-            correct = sum(1 for question in questions if answer_map.get(question.id, "") == question.answer.strip())
-            total = len(questions)
-            score = round((correct / total) * 100) if total else 0
-            score_sum += score
-            rows.append(
-                {
-                    "session_id": session.id,
-                    "student_name": session.student_name or "Student",
-                    "test_title": session.test.title,
-                    "test_slug": session.test.slug,
-                    "item_id": session.exam_pack_item_id,
-                    "item_title": session.exam_pack_item.title if session.exam_pack_item else "",
-                    "score": score,
-                    "correct": correct,
-                    "total": total,
-                    "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
-                }
-            )
-        count = len(rows)
-        return response.Response(
-            {
-                "pack": ExamPackSerializer(pack).data,
-                "attempts": count,
-                "average_score": round(score_sum / count) if count else 0,
-                "results": rows,
-            }
-        )
+        return response.Response(exam_pack_results_payload(pack))
 
 
 @decorators.api_view(["GET"])
