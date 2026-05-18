@@ -142,6 +142,12 @@ class School(TimestampedModel):
     manage_code = models.CharField(max_length=80, blank=True)
     visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PRIVATE)
     description = models.TextField(blank=True)
+    portal_subdomain = models.SlugField(max_length=80, blank=True)
+    portal_domain = models.CharField(max_length=160, blank=True)
+    logo_url = models.URLField(blank=True)
+    primary_color = models.CharField(max_length=24, default="#151713")
+    accent_color = models.CharField(max_length=24, default="#8fd6bd")
+    student_invite_code = models.CharField(max_length=80, blank=True)
 
     def __str__(self) -> str:
         return self.name
@@ -175,11 +181,26 @@ class ClassStudent(TimestampedModel):
 
 
 class ClassTestAssignment(TimestampedModel):
+    class Mode(models.TextChoices):
+        SESSION = "session", "Live session"
+        HOMEWORK = "homework", "Homework"
+
+    class GradingPolicy(models.TextChoices):
+        BEST = "best", "Best attempt"
+        LATEST = "latest", "Latest attempt"
+        FIRST = "first", "First attempt"
+
     classroom = models.ForeignKey(TeacherClass, related_name="assignments", on_delete=models.CASCADE)
     test = models.ForeignKey(Test, related_name="class_assignments", on_delete=models.CASCADE)
     title = models.CharField(max_length=160)
+    mode = models.CharField(max_length=24, choices=Mode.choices, default=Mode.SESSION)
     opens_at = models.DateTimeField(null=True, blank=True)
     closes_at = models.DateTimeField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    attempt_limit = models.PositiveIntegerField(default=1)
+    show_answers_after_deadline = models.BooleanField(default=False)
+    allow_late_submission = models.BooleanField(default=False)
+    grading_policy = models.CharField(max_length=24, choices=GradingPolicy.choices, default=GradingPolicy.BEST)
     is_active = models.BooleanField(default=True)
 
     def __str__(self) -> str:

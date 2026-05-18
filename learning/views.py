@@ -89,9 +89,16 @@ def class_results_payload(classroom):
             "assignment_title": assignment.title,
             "test_title": assignment.test.title,
             "test_slug": assignment.test.slug,
+            "mode": assignment.mode,
+            "due_at": assignment.due_at.isoformat() if assignment.due_at else None,
+            "attempt_limit": assignment.attempt_limit,
+            "show_answers_after_deadline": assignment.show_answers_after_deadline,
+            "allow_late_submission": assignment.allow_late_submission,
+            "grading_policy": assignment.grading_policy,
             "is_active": assignment.is_active,
             "attempts": 0,
             "unique_students": 0,
+            "late_submissions": 0,
             "average_score": 0,
             "_score_sum": 0,
             "_students": set(),
@@ -128,9 +135,16 @@ def class_results_payload(classroom):
                     "assignment_title": session.assignment.title if session.assignment else "",
                     "test_title": session.test.title,
                     "test_slug": session.test.slug,
+                    "mode": session.assignment.mode if session.assignment else ClassTestAssignment.Mode.SESSION,
+                    "due_at": session.assignment.due_at.isoformat() if session.assignment and session.assignment.due_at else None,
+                    "attempt_limit": session.assignment.attempt_limit if session.assignment else 1,
+                    "show_answers_after_deadline": session.assignment.show_answers_after_deadline if session.assignment else False,
+                    "allow_late_submission": session.assignment.allow_late_submission if session.assignment else False,
+                    "grading_policy": session.assignment.grading_policy if session.assignment else ClassTestAssignment.GradingPolicy.BEST,
                     "is_active": session.assignment.is_active if session.assignment else False,
                     "attempts": 0,
                     "unique_students": 0,
+                    "late_submissions": 0,
                     "average_score": 0,
                     "_score_sum": 0,
                     "_students": set(),
@@ -139,6 +153,8 @@ def class_results_payload(classroom):
             assignment_data["attempts"] += 1
             assignment_data["_score_sum"] += score
             assignment_data["_students"].add(student_code)
+            if session.assignment and session.assignment.due_at and session.submitted_at and session.submitted_at > session.assignment.due_at:
+                assignment_data["late_submissions"] += 1
 
         for question in questions:
             is_correct = answer_map.get(question.id, "") == question.answer.strip()
@@ -156,10 +172,12 @@ def class_results_payload(classroom):
                 "test_slug": session.test.slug,
                 "assignment_id": session.assignment_id,
                 "assignment_title": session.assignment.title if session.assignment else "",
+                "assignment_mode": session.assignment.mode if session.assignment else None,
                 "score": score,
                 "correct": correct,
                 "total": total,
                 "submitted_at": submitted_at,
+                "is_late": bool(session.assignment and session.assignment.due_at and session.submitted_at and session.submitted_at > session.assignment.due_at),
             }
         )
 
@@ -195,9 +213,16 @@ def class_results_payload(classroom):
                 "assignment_title": item["assignment_title"],
                 "test_title": item["test_title"],
                 "test_slug": item["test_slug"],
+                "mode": item["mode"],
+                "due_at": item["due_at"],
+                "attempt_limit": item["attempt_limit"],
+                "show_answers_after_deadline": item["show_answers_after_deadline"],
+                "allow_late_submission": item["allow_late_submission"],
+                "grading_policy": item["grading_policy"],
                 "is_active": item["is_active"],
                 "attempts": attempts,
                 "unique_students": len(item["_students"]),
+                "late_submissions": item["late_submissions"],
                 "average_score": round(item["_score_sum"] / attempts) if attempts else 0,
             }
         )
@@ -625,8 +650,14 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
                     "test": test.id,
                     "title": row.get("title") or test.title,
                     "is_active": row.get("is_active", True),
+                    "mode": row.get("mode", ClassTestAssignment.Mode.SESSION),
                     "opens_at": row.get("opens_at"),
                     "closes_at": row.get("closes_at"),
+                    "due_at": row.get("due_at"),
+                    "attempt_limit": row.get("attempt_limit", 1),
+                    "show_answers_after_deadline": row.get("show_answers_after_deadline", False),
+                    "allow_late_submission": row.get("allow_late_submission", False),
+                    "grading_policy": row.get("grading_policy", ClassTestAssignment.GradingPolicy.BEST),
                 }
             )
             serializer.is_valid(raise_exception=True)
@@ -668,6 +699,11 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
         assignment = ClassTestAssignment.objects.select_related("test").get(id=assignment_id, classroom=classroom)
         if not assignment.is_active:
             return response.Response({"detail": "Assignment is not active."}, status=status.HTTP_400_BAD_REQUEST)
+        now = timezone.now()
+        if assignment.opens_at and assignment.opens_at > now:
+            return response.Response({"detail": "Assignment is not open yet."}, status=status.HTTP_400_BAD_REQUEST)
+        if assignment.closes_at and assignment.closes_at < now:
+            return response.Response({"detail": "Assignment is closed."}, status=status.HTTP_400_BAD_REQUEST)
         student_name = request.data.get("student_name", "").strip()
         join_code = request.data.get("join_code", "")
         if classroom.visibility == TeacherClass.Visibility.PRIVATE and join_code != classroom.join_code:
@@ -677,6 +713,12 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
         student_code = request.data.get("student_code", "").strip()
         if not student_code:
             return response.Response({"student_code": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if assignment.mode == ClassTestAssignment.Mode.HOMEWORK:
+            if assignment.due_at and assignment.due_at < now and not assignment.allow_late_submission:
+                return response.Response({"detail": "Homework deadline has passed."}, status=status.HTTP_400_BAD_REQUEST)
+            previous_attempts = TestSession.objects.filter(assignment=assignment, student_code=student_code).count()
+            if previous_attempts >= assignment.attempt_limit:
+                return response.Response({"detail": "Attempt limit reached."}, status=status.HTTP_400_BAD_REQUEST)
         ClassStudent.objects.update_or_create(
             classroom=classroom,
             student_code=student_code,
@@ -702,6 +744,20 @@ class SchoolViewSet(viewsets.ModelViewSet):
     queryset = School.objects.prefetch_related("teachers__classes").all().order_by("-created_at")
     serializer_class = SchoolSerializer
     lookup_field = "slug"
+
+    def update(self, request, *args, **kwargs):
+        school = self.get_object()
+        denied = require_manage_code(request, school.manage_code)
+        if denied:
+            return denied
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        school = self.get_object()
+        denied = require_manage_code(request, school.manage_code)
+        if denied:
+            return denied
+        return super().destroy(request, *args, **kwargs)
 
     @decorators.action(detail=True, methods=["get", "post"])
     def teachers(self, request, slug=None):
@@ -803,6 +859,7 @@ class SchoolViewSet(viewsets.ModelViewSet):
         return response.Response(
             {
                 "school": SchoolSerializer(school).data,
+                "portal_url": school.portal_domain or (f"https://{school.portal_subdomain}.yourplatform.com" if school.portal_subdomain else ""),
                 "teacher_count": teachers.count(),
                 "class_count": len(class_rows),
                 "students_submitted": len(student_codes),
