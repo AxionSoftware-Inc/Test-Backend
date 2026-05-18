@@ -131,6 +131,37 @@ class TeacherClass(TimestampedModel):
         return self.name
 
 
+class School(TimestampedModel):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Public"
+        PRIVATE = "private", "Private"
+
+    name = models.CharField(max_length=180)
+    slug = models.SlugField(unique=True)
+    owner_name = models.CharField(max_length=160, blank=True)
+    manage_code = models.CharField(max_length=80, blank=True)
+    visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PRIVATE)
+    description = models.TextField(blank=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class SchoolTeacher(TimestampedModel):
+    school = models.ForeignKey(School, related_name="teachers", on_delete=models.CASCADE)
+    name = models.CharField(max_length=160)
+    email = models.EmailField(blank=True)
+    teacher_code = models.CharField(max_length=80, blank=True)
+    classes = models.ManyToManyField(TeacherClass, related_name="school_teachers", blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ("school", "teacher_code")
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class ClassStudent(TimestampedModel):
     classroom = models.ForeignKey(TeacherClass, related_name="students", on_delete=models.CASCADE)
     name = models.CharField(max_length=160)

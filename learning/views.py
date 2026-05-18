@@ -10,6 +10,8 @@ from learning.models import (
     ExamPackItem,
     Question,
     RoleProfile,
+    School,
+    SchoolTeacher,
     Skill,
     Subject,
     TeacherClass,
@@ -26,6 +28,8 @@ from learning.serializers import (
     ExamPackSerializer,
     QuestionSerializer,
     RoleProfileSerializer,
+    SchoolSerializer,
+    SchoolTeacherSerializer,
     SkillSerializer,
     SubjectSerializer,
     TeacherClassSerializer,
@@ -692,6 +696,123 @@ class TeacherClassViewSet(viewsets.ModelViewSet):
     def results(self, request, slug=None):
         classroom = self.get_object()
         return response.Response(class_results_payload(classroom))
+
+
+class SchoolViewSet(viewsets.ModelViewSet):
+    queryset = School.objects.prefetch_related("teachers__classes").all().order_by("-created_at")
+    serializer_class = SchoolSerializer
+    lookup_field = "slug"
+
+    @decorators.action(detail=True, methods=["get", "post"])
+    def teachers(self, request, slug=None):
+        school = self.get_object()
+        if request.method == "GET":
+            teachers = school.teachers.prefetch_related("classes").order_by("-created_at")
+            return response.Response(SchoolTeacherSerializer(teachers, many=True).data)
+
+        denied = require_manage_code(request, school.manage_code)
+        if denied:
+            return denied
+        serializer = SchoolTeacherSerializer(data={**request.data, "school": school.id})
+        serializer.is_valid(raise_exception=True)
+        teacher = serializer.save(school=school)
+        class_ids = request.data.get("classes", [])
+        if isinstance(class_ids, list):
+            teacher.classes.set(TeacherClass.objects.filter(id__in=class_ids))
+        return response.Response(SchoolTeacherSerializer(teacher).data, status=status.HTTP_201_CREATED)
+
+    @decorators.action(detail=True, methods=["patch", "delete"], url_path=r"teachers/(?P<teacher_id>[^/.]+)")
+    def teacher_detail(self, request, slug=None, teacher_id=None):
+        school = self.get_object()
+        teacher = SchoolTeacher.objects.prefetch_related("classes").get(id=teacher_id, school=school)
+        denied = require_manage_code(request, school.manage_code)
+        if denied:
+            return denied
+        if request.method == "DELETE":
+            teacher.is_active = False
+            teacher.save(update_fields=["is_active", "updated_at"])
+            return response.Response(SchoolTeacherSerializer(teacher).data)
+        serializer = SchoolTeacherSerializer(teacher, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        teacher = serializer.save(school=school)
+        class_ids = request.data.get("classes")
+        if isinstance(class_ids, list):
+            teacher.classes.set(TeacherClass.objects.filter(id__in=class_ids))
+        return response.Response(SchoolTeacherSerializer(teacher).data)
+
+    @decorators.action(detail=True, methods=["get"])
+    def analytics(self, request, slug=None):
+        school = self.get_object()
+        teachers = school.teachers.prefetch_related("classes").filter(is_active=True)
+        teacher_rows = []
+        class_rows = []
+        student_codes = set()
+        total_attempts = 0
+        score_sum = 0
+        weak_skill_totals = {}
+
+        for teacher in teachers:
+            teacher_attempts = 0
+            teacher_score_sum = 0
+            teacher_students = set()
+            for classroom in teacher.classes.all():
+                payload = class_results_payload(classroom)
+                class_rows.append(
+                    {
+                        "class_id": classroom.id,
+                        "class_slug": classroom.slug,
+                        "class_name": classroom.name,
+                        "teacher_id": teacher.id,
+                        "teacher_name": teacher.name,
+                        "attempts": payload["attempts"],
+                        "students_submitted": payload["students_submitted"],
+                        "sessions_total": payload["sessions_total"],
+                        "average_score": payload["average_score"],
+                    }
+                )
+                teacher_attempts += payload["attempts"]
+                teacher_score_sum += payload["average_score"] * payload["attempts"]
+                for student in payload["student_progress"]:
+                    teacher_students.add(student["student_code"])
+                    student_codes.add(student["student_code"])
+                for skill in payload["weak_skills"]:
+                    data = weak_skill_totals.setdefault(skill["skill"], {"skill": skill["skill"], "correct": 0, "total": 0})
+                    data["correct"] += skill["correct"]
+                    data["total"] += skill["total"]
+            total_attempts += teacher_attempts
+            score_sum += teacher_score_sum
+            teacher_rows.append(
+                {
+                    "teacher_id": teacher.id,
+                    "teacher_name": teacher.name,
+                    "email": teacher.email,
+                    "class_count": teacher.classes.count(),
+                    "attempts": teacher_attempts,
+                    "students_submitted": len(teacher_students),
+                    "average_score": round(teacher_score_sum / teacher_attempts) if teacher_attempts else 0,
+                    "is_active": teacher.is_active,
+                }
+            )
+
+        weak_skills = [
+            {**item, "percent": round((item["correct"] / item["total"]) * 100) if item["total"] else 0}
+            for item in weak_skill_totals.values()
+        ]
+        weak_skills.sort(key=lambda item: item["percent"])
+
+        return response.Response(
+            {
+                "school": SchoolSerializer(school).data,
+                "teacher_count": teachers.count(),
+                "class_count": len(class_rows),
+                "students_submitted": len(student_codes),
+                "attempts": total_attempts,
+                "average_score": round(score_sum / total_attempts) if total_attempts else 0,
+                "teachers": teacher_rows,
+                "classes": class_rows,
+                "weak_skills": weak_skills[:8],
+            }
+        )
 
 
 class ExamPackViewSet(viewsets.ModelViewSet):

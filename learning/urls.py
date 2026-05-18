@@ -5,6 +5,7 @@ from django.urls import path
 from learning.views import (
     QuestionViewSet,
     ExamPackViewSet,
+    SchoolViewSet,
     SkillViewSet,
     SubjectViewSet,
     TeacherClassViewSet,
@@ -25,6 +26,7 @@ router.register("tests", TestViewSet)
 router.register("sessions", TestSessionViewSet)
 router.register("classes", TeacherClassViewSet)
 router.register("exam-packs", ExamPackViewSet)
+router.register("schools", SchoolViewSet)
 
 urlpatterns = [
     path("profile/summary/", profile_summary),

@@ -8,6 +8,8 @@ from learning.models import (
     ExamPackItem,
     Question,
     RoleProfile,
+    School,
+    SchoolTeacher,
     Skill,
     Subject,
     TeacherClass,
@@ -268,6 +270,48 @@ class TeacherClassSerializer(serializers.ModelSerializer):
             "student_count",
             "assignment_count",
             "assignments",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+
+class SchoolTeacherSerializer(serializers.ModelSerializer):
+    class_count = serializers.IntegerField(source="classes.count", read_only=True)
+    class_slugs = serializers.SlugRelatedField(source="classes", slug_field="slug", many=True, read_only=True)
+
+    class Meta:
+        model = SchoolTeacher
+        fields = [
+            "id",
+            "school",
+            "name",
+            "email",
+            "teacher_code",
+            "classes",
+            "class_slugs",
+            "class_count",
+            "is_active",
+            "created_at",
+        ]
+        read_only_fields = ["school", "created_at"]
+
+
+class SchoolSerializer(serializers.ModelSerializer):
+    teacher_count = serializers.IntegerField(source="teachers.count", read_only=True)
+    teachers = SchoolTeacherSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = School
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "owner_name",
+            "manage_code",
+            "visibility",
+            "description",
+            "teacher_count",
+            "teachers",
             "created_at",
         ]
         read_only_fields = ["created_at"]
