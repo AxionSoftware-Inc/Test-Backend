@@ -10,6 +10,28 @@ class TimestampedModel(models.Model):
         abstract = True
 
 
+class RoleProfile(TimestampedModel):
+    class Role(models.TextChoices):
+        STUDENT = "student", "Student"
+        TEACHER = "teacher", "Teacher"
+        SCHOOL = "school", "School"
+        CREATOR = "creator", "Creator"
+        ADMIN = "admin", "Admin"
+
+    identity_code = models.CharField(max_length=120, unique=True)
+    display_name = models.CharField(max_length=160, blank=True)
+    active_role = models.CharField(max_length=24, choices=Role.choices, default=Role.STUDENT)
+    available_roles = models.JSONField(default=list, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.available_roles:
+            self.available_roles = [choice[0] for choice in self.Role.choices]
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.identity_code} / {self.active_role}"
+
+
 class Subject(TimestampedModel):
     title = models.CharField(max_length=120)
     slug = models.SlugField(unique=True)

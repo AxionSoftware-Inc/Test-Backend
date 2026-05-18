@@ -13,6 +13,7 @@ from learning.views import (
     TopicViewSet,
     mistakes_summary,
     profile_summary,
+    role_profile,
 )
 
 router = DefaultRouter()
@@ -27,6 +28,7 @@ router.register("exam-packs", ExamPackViewSet)
 
 urlpatterns = [
     path("profile/summary/", profile_summary),
+    path("profile/role/", role_profile),
     path("mistakes/summary/", mistakes_summary),
     *router.urls,
 ]

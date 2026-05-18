@@ -7,6 +7,7 @@ from learning.models import (
     ExamPack,
     ExamPackItem,
     Question,
+    RoleProfile,
     Skill,
     Subject,
     TeacherClass,
@@ -21,6 +22,19 @@ class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subject
         fields = ["id", "title", "slug", "description"]
+
+
+class RoleProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoleProfile
+        fields = ["identity_code", "display_name", "active_role", "available_roles", "created_at", "updated_at"]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def validate_active_role(self, value):
+        valid_roles = {choice[0] for choice in RoleProfile.Role.choices}
+        if value not in valid_roles:
+            raise serializers.ValidationError("Invalid role.")
+        return value
 
 
 class TopicSerializer(serializers.ModelSerializer):

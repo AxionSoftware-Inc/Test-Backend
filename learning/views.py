@@ -9,6 +9,7 @@ from learning.models import (
     ExamPack,
     ExamPackItem,
     Question,
+    RoleProfile,
     Skill,
     Subject,
     TeacherClass,
@@ -24,6 +25,7 @@ from learning.serializers import (
     ExamPackItemSerializer,
     ExamPackSerializer,
     QuestionSerializer,
+    RoleProfileSerializer,
     SkillSerializer,
     SubjectSerializer,
     TeacherClassSerializer,
@@ -53,6 +55,22 @@ def require_manage_key(request, expected):
     if provided != expected:
         return response.Response({"detail": "Valid manage key is required."}, status=status.HTTP_403_FORBIDDEN)
     return None
+
+
+@decorators.api_view(["GET", "PATCH"])
+def role_profile(request):
+    identity_code = request.query_params.get("identity_code", "").strip() or request.data.get("identity_code", "").strip()
+    if not identity_code:
+        return response.Response({"identity_code": "This field is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    profile, _ = RoleProfile.objects.get_or_create(identity_code=identity_code)
+    if request.method == "GET":
+        return response.Response(RoleProfileSerializer(profile).data)
+
+    serializer = RoleProfileSerializer(profile, data={**request.data, "identity_code": identity_code}, partial=True)
+    serializer.is_valid(raise_exception=True)
+    profile = serializer.save()
+    return response.Response(RoleProfileSerializer(profile).data)
 
 
 class SubjectViewSet(viewsets.ModelViewSet):
